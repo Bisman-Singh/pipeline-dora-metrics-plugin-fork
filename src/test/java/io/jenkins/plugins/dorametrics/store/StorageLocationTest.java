@@ -46,6 +46,12 @@ class StorageLocationTest {
     }
 
     @Test
+    void byDefaultTheDatabaseStaysInJenkinsHome() {
+        assertEquals(new File(j.jenkins.getRootDir(), "pipeline-dora-metrics/metrics.db").getAbsoluteFile(),
+                MetricsStore.getInstance().getDatabaseFile());
+    }
+
+    @Test
     void networkFileSystemsAreRecognised() {
         for (String type : new String[] {"nfs", "nfs4", "NFS4", "cifs", "smbfs", "afpfs", "fuse.sshfs", "glusterfs"}) {
             assertTrue(MetricsStore.isNetworkFileSystem(type), type);
@@ -57,6 +63,7 @@ class StorageLocationTest {
 
     @Test
     void localStorageRaisesNoWarning() {
+        MetricsStore.getInstance();
         assertFalse(ExtensionList.lookupSingleton(NetworkStorageMonitor.class).isActivated());
     }
 
@@ -70,5 +77,6 @@ class StorageLocationTest {
         String page = wc.goTo("manage/").getWebResponse().getContentAsString();
         assertTrue(page.contains("on a network filesystem"), "the warning shows on Manage Jenkins");
         assertTrue(page.contains(MetricsStore.DIRECTORY_PROPERTY));
+        assertTrue(page.contains("Dismiss"), "administrators can dismiss it");
     }
 }

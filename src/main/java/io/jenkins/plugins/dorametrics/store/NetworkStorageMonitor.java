@@ -3,9 +3,12 @@ package io.jenkins.plugins.dorametrics.store;
 import hudson.Extension;
 import hudson.model.AdministrativeMonitor;
 
+import java.io.File;
+
 /**
  * Tells administrators when the metrics database is on a network filesystem, where SQLite's
- * locking and syncing are unreliable and slow writes can delay builds.
+ * locking and syncing are unreliable and slow writes can delay builds. It only looks at a store
+ * that is already open, so showing Manage Jenkins never waits on the database.
  */
 @Extension
 public class NetworkStorageMonitor extends AdministrativeMonitor {
@@ -22,15 +25,13 @@ public class NetworkStorageMonitor extends AdministrativeMonitor {
 
     /** The network filesystem the database is on, or null. */
     public String getFileSystem() {
-        try {
-            return MetricsStore.getInstance().getNetworkFileSystem();
-        } catch (RuntimeException e) {
-            return null;
-        }
+        MetricsStore store = MetricsStore.existingInstance();
+        return store != null ? store.getNetworkFileSystem() : null;
     }
 
     public String getDatabasePath() {
-        java.io.File file = MetricsStore.getInstance().getDatabaseFile();
+        MetricsStore store = MetricsStore.existingInstance();
+        File file = store != null ? store.getDatabaseFile() : null;
         return file != null ? file.getPath() : "";
     }
 

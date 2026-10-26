@@ -18,6 +18,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -31,7 +33,7 @@ import java.util.regex.Pattern;
 public class MetricsStore {
 
     private static final Logger LOGGER = Logger.getLogger(MetricsStore.class.getName());
-    private static MetricsStore instance;
+    private static volatile MetricsStore instance;
 
     private static final Set<String> ALLOWED_ORDER_BY = Set.of(
             "avg_dur DESC", "avg_dur ASC", "failures DESC", "failures ASC",
@@ -44,7 +46,7 @@ public class MetricsStore {
     /** Filesystem types SQLite should not be used on: its locking and syncing are unreliable there. */
     private static final Set<String> NETWORK_FILE_SYSTEMS = Set.of(
             "nfs", "nfs4", "cifs", "smb", "smbfs", "smb2", "smb3", "afpfs", "webdav", "fuse.sshfs",
-            "glusterfs", "fuse.glusterfs", "ceph", "fuse.ceph", "lustre", "9p");
+            "glusterfs", "fuse.glusterfs", "ceph", "fuse.ceph", "lustre");
 
     private final String dbUrl;
     private final File dbFile;
@@ -54,11 +56,14 @@ public class MetricsStore {
     // lock, and the -wal and -shm files are not created and removed again for every write.
     private final ReentrantLock writeLock = new ReentrantLock();
     private Connection writeConnection;
+    /** How long a write waits for another write in this process, as busy_timeout does for other processes. */
+    long writeLockTimeoutMs = 5000;
 
     private MetricsStore() {
         File dbDir = databaseDirectory();
-        if (!dbDir.exists()) {
-            dbDir.mkdirs();
+        if (!dbDir.isDirectory() && !dbDir.mkdirs()) {
+            LOGGER.severe("Pipeline DORA Metrics: cannot create " + dbDir
+                    + ", so builds are not recorded until it exists and Jenkins can write to it");
         }
         this.dbFile = new File(dbDir, "metrics.db");
         this.dbUrl = "jdbc:sqlite:" + dbFile.getAbsolutePath();
@@ -131,6 +136,11 @@ public class MetricsStore {
         return dbFile;
     }
 
+    /** The store if one is open, without opening one: for callers that must never wait on the database. */
+    public static MetricsStore existingInstance() {
+        return instance;
+    }
+
     public static synchronized MetricsStore getInstance() {
         if (instance == null) {
             instance = new MetricsStore();
@@ -152,8 +162,39 @@ public class MetricsStore {
         synchronized (MetricsStore.class) {
             store = instance;
         }
-        if (store != null) {
-            store.close();
+        if (store != null && !store.closeIfFree(2, TimeUnit.SECONDS)) {
+            LOGGER.warning("Pipeline DORA Metrics: a write is still running, leaving the database to close with Jenkins");
+        }
+    }
+
+    /** Closes the shared write connection unless a write holds it for longer than the timeout. */
+    boolean closeIfFree(long timeout, TimeUnit unit) {
+        try {
+            if (!writeLock.tryLock(timeout, unit)) {
+                return false;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        try {
+            closeQuietly(writeConnection);
+            writeConnection = null;
+            return true;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /** Holds the write lock until {@code release} opens, for tests that need a write in progress. */
+    void holdWriteLockUntil(CountDownLatch held, CountDownLatch release)
+            throws InterruptedException {
+        writeLock.lock();
+        try {
+            held.countDown();
+            release.await();
+        } finally {
+            writeLock.unlock();
         }
     }
 
@@ -191,7 +232,15 @@ public class MetricsStore {
      * another process holding the lock is closed, so the next write starts on a fresh one.
      */
     private <T> T write(Write<T> write) throws SQLException {
-        writeLock.lock();
+        try {
+            if (!writeLock.tryLock(writeLockTimeoutMs, TimeUnit.MILLISECONDS)) {
+                throw new org.sqlite.SQLiteException("Another write in Jenkins kept the database busy for longer than "
+                        + writeLockTimeoutMs + "ms", org.sqlite.SQLiteErrorCode.SQLITE_BUSY);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new SQLException("Interrupted while waiting to write", e);
+        }
         try {
             if (writeConnection == null || writeConnection.isClosed()) {
                 writeConnection = getConnection();
@@ -208,9 +257,14 @@ public class MetricsStore {
             } finally {
                 if (writeConnection != null) {
                     try {
+                        // setAutoCommit(true) commits, so only after a rollback that worked
                         if (!writeConnection.getAutoCommit()) {
-                            rollbackQuietly(writeConnection);
-                            writeConnection.setAutoCommit(true);
+                            if (rollbackQuietly(writeConnection)) {
+                                writeConnection.setAutoCommit(true);
+                            } else {
+                                closeQuietly(writeConnection);
+                                writeConnection = null;
+                            }
                         }
                     } catch (SQLException e) {
                         closeQuietly(writeConnection);
@@ -225,12 +279,19 @@ public class MetricsStore {
 
     private Connection getConnection() throws SQLException {
         Connection conn = DriverManager.getConnection(dbUrl);
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute("PRAGMA journal_mode=WAL");
-            stmt.execute("PRAGMA busy_timeout=5000");
+        try {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("PRAGMA busy_timeout=5000");
+                stmt.execute("PRAGMA journal_mode=WAL");
+                // the write connection stays open, so cap the WAL file once it has been checkpointed
+                stmt.execute("PRAGMA journal_size_limit=8388608");
+            }
+            org.sqlite.Function.create(conn, "REGEXP", new RegexpFunction());
+            return conn;
+        } catch (SQLException e) {
+            closeQuietly(conn);
+            throw e;
         }
-        org.sqlite.Function.create(conn, "REGEXP", new RegexpFunction());
-        return conn;
     }
 
     /**
@@ -451,14 +512,16 @@ public class MetricsStore {
                 Collections.emptyList(), Collections.emptyList());
     }
 
-    private static void rollbackQuietly(Connection conn) {
+    private static boolean rollbackQuietly(Connection conn) {
         if (conn == null) {
-            return;
+            return false;
         }
         try {
             conn.rollback();
+            return true;
         } catch (SQLException e) {
             LOGGER.log(Level.FINE, "Could not roll back", e);
+            return false;
         }
     }
 

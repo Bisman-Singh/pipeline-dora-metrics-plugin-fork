@@ -4,6 +4,7 @@ import hudson.init.Terminator;
 import hudson.model.FreeStyleBuild;
 import hudson.model.FreeStyleProject;
 import hudson.model.Run;
+import io.jenkins.plugins.dorametrics.DoraGlobalConfiguration;
 import io.jenkins.plugins.dorametrics.store.MetricsStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -126,11 +127,44 @@ class RecordingQueueTest {
         j.buildAndAssertSuccess(app);
         j.buildAndAssertSuccess(app);
 
-        assertTrue(logs.getMessages().stream().anyMatch(m -> m.contains("not recording app #3")),
+        assertTrue(logs.getMessages().stream().anyMatch(m -> m.contains("app #3") && m.contains("not recorded")),
                 String.valueOf(logs.getMessages()));
         release.countDown();
         awaitStarted(2);
         assertEquals(List.of("app #1", "app #2"), started);
+    }
+
+    @Test
+    void aStuckWriteWarnsOnceNotForEveryBuild() throws Exception {
+        System.setProperty(RecordingQueue.WAIT_PROPERTY, "1");
+        recorderThatHangs();
+        FreeStyleProject app = j.createFreeStyleProject("app");
+        for (int i = 0; i < 4; i++) {
+            j.buildAndAssertSuccess(app);
+        }
+        long warnings = logs.getMessages().stream().filter(m -> m.contains("took longer than")).count();
+        assertEquals(1, warnings, String.valueOf(logs.getMessages()));
+    }
+
+    @Test
+    void excludedJobsAreNotQueued() throws Exception {
+        DoraGlobalConfiguration.get().setExcludedJobPattern("app");
+        recorderThatHangs();
+        FreeStyleProject app = j.createFreeStyleProject("app");
+        assertTimeoutPreemptively(Duration.ofSeconds(30), () -> j.buildAndAssertSuccess(app));
+        assertEquals(List.of(), started);
+    }
+
+    @Test
+    void stoppingDoesNotHangOnAStuckWrite() throws Exception {
+        System.setProperty(RecordingQueue.WAIT_PROPERTY, "0");
+        recorderThatHangs();
+        FreeStyleProject app = j.createFreeStyleProject("app");
+        j.buildAndAssertSuccess(app);
+        awaitStarted(1);
+        // the drain gives up after 10 s and the store does not wait on the stuck write
+        assertTimeoutPreemptively(Duration.ofSeconds(30), RecordingQueue::shutdown);
+        RecordingQueue.start();
     }
 
     @Test
@@ -140,6 +174,9 @@ class RecordingQueueTest {
         assertTrue(shutdown.isAnnotationPresent(Terminator.class));
         assertTrue(Modifier.isPublic(RecordingQueue.class.getModifiers()));
         assertTrue(Modifier.isStatic(shutdown.getModifiers()));
+        Method start = RecordingQueue.class.getMethod("start");
+        assertTrue(start.isAnnotationPresent(hudson.init.Initializer.class));
+        assertTrue(Modifier.isStatic(start.getModifiers()));
     }
 
     @Test
@@ -152,6 +189,7 @@ class RecordingQueueTest {
         awaitStarted(1);
         release.countDown();
         RecordingQueue.shutdown();
+        RecordingQueue.start();
         assertEquals(List.of("app #1", "app #2"), started, "both queued builds are written before it stops");
     }
 
