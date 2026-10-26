@@ -1,0 +1,10 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core">
+    <div class="jenkins-alert jenkins-alert-warning">
+        Pipeline DORA Metrics keeps its database at <code>${it.databasePath}</code>, on a network filesystem
+        (<code>${it.fileSystem}</code>). SQLite is not reliable on network storage, and slow writes there can delay
+        builds. Move it to local disk: start Jenkins with
+        <code>-D${it.directoryProperty}=/a/directory/on/local/disk</code>, or, while Jenkins is stopped, move the
+        <code>pipeline-dora-metrics</code> folder to local disk and link it back.
+    </div>
+</j:jelly>
