@@ -107,7 +107,7 @@ A `RunListener` records every build of a tracked job when it finishes, Pipeline 
 
 Back up or replace `metrics.db` only while Jenkins is stopped. While it runs, recent writes can still be in `metrics.db-wal` next to it.
 
-**A build never waits long for it.** Each finished build is written on a background thread. A build waits up to 5 seconds for its own write, so on healthy storage the data is there when it finishes. Past that it finishes anyway, the write carries on behind it, and builds stop waiting until the writer has caught up. The log says so once, and again when it has caught up. When 1000 builds are already waiting to be written, the next ones are skipped and counted, and Import history adds them later. Both numbers are system properties, `io.jenkins.plugins.dorametrics.collectors.RecordingQueue.waitSeconds` and `io.jenkins.plugins.dorametrics.collectors.RecordingQueue.capacity`.
+**A build never waits long for it.** Each finished build is written on a background thread. A build waits up to 5 seconds for its own write, so on healthy storage the data is there when it finishes. Past that it finishes anyway and the write carries on behind it, and for the next minute builds do not wait for their writes at all, so slow storage costs one build the wait, not every build. The log says so at most once a minute. When 1000 builds are already waiting to be written, the next ones are skipped, the log says how many once the writer has caught up, and Import history adds them later. Both numbers are system properties, `io.jenkins.plugins.dorametrics.collectors.RecordingQueue.waitSeconds` and `io.jenkins.plugins.dorametrics.collectors.RecordingQueue.capacity`.
 
 ### Build history import
 

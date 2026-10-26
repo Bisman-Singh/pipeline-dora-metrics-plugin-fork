@@ -33,16 +33,18 @@ import java.util.logging.Logger;
  * a job that does not allow concurrent builds waiting behind it.
  *
  * <p>A build waits for its own write for up to {@link #WAIT_PROPERTY} seconds, so on healthy
- * storage the data is there when the build finishes, as before. Once a wait runs out, or the
- * write in progress is older than that, builds stop waiting until the writer has caught up.
- * Builds are written in order; when {@link #CAPACITY_PROPERTY} builds are already waiting, the
- * next ones are not recorded. Import history adds them later.
+ * storage the data is there when the build finishes, as before. Once a wait runs out, builds do
+ * not wait at all for the next minute, so slow storage costs one build the wait rather than every
+ * build; nor do they while the write in progress is older than the wait. Builds are written in
+ * order; when {@link #CAPACITY_PROPERTY} builds are already waiting, the next ones are not
+ * recorded. Import history adds them later.
  */
 public final class RecordingQueue {
 
     static final String WAIT_PROPERTY = RecordingQueue.class.getName() + ".waitSeconds";
     static final String CAPACITY_PROPERTY = RecordingQueue.class.getName() + ".capacity";
     private static final int DRAIN_SECONDS = 10;
+    private static final long NO_WAIT_AFTER_TIMEOUT_MS = TimeUnit.MINUTES.toMillis(1);
 
     private static final Logger LOGGER = Logger.getLogger(RecordingQueue.class.getName());
 
@@ -100,8 +102,9 @@ public final class RecordingQueue {
         private final ThreadPoolExecutor pool;
         /** When the write in progress started, or 0 when none is. */
         private volatile long busySince;
-        /** Set once a build stopped waiting, cleared when the queue is empty again. */
-        private volatile boolean behind;
+        /** Builds do not wait before this time, set when a wait runs out. */
+        private volatile long noWaitUntil;
+        /** Builds not recorded because the queue was full, reported once the queue is empty again. */
         private final AtomicInteger skipped = new AtomicInteger();
 
         Writer(int capacity) {
@@ -126,23 +129,22 @@ public final class RecordingQueue {
                             + "written, so " + name + " and any more until the writer catches up are not recorded. "
                             + "Import history on the dashboard adds them later.");
                 }
-                behind = true;
                 return;
             }
 
+            long now = System.currentTimeMillis();
             long since = busySince;
-            if (waitMs <= 0 || behind || (since != 0 && System.currentTimeMillis() - since > waitMs)) {
+            if (waitMs <= 0 || now < noWaitUntil || (since != 0 && now - since > waitMs)) {
                 return;
             }
             try {
                 written.get(waitMs, TimeUnit.MILLISECONDS);
             } catch (TimeoutException e) {
-                if (!behind) {
-                    behind = true;
-                    LOGGER.warning("Pipeline DORA Metrics: writing " + name + " took longer than "
-                            + TimeUnit.MILLISECONDS.toSeconds(waitMs) + "s, so builds finish without waiting for "
-                            + "their metrics until the writer catches up. Slow storage for the database is the usual cause.");
-                }
+                noWaitUntil = System.currentTimeMillis() + NO_WAIT_AFTER_TIMEOUT_MS;
+                LOGGER.warning("Pipeline DORA Metrics: writing " + name + " took longer than "
+                        + TimeUnit.MILLISECONDS.toSeconds(waitMs) + "s, so for the next minute builds finish without "
+                        + "waiting for their metrics, which are written in the background. "
+                        + "Slow storage for the database is the usual cause.");
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (ExecutionException e) {
@@ -163,12 +165,12 @@ public final class RecordingQueue {
                 LOGGER.log(Level.WARNING, "Failed to collect metrics for " + name, e);
             } finally {
                 busySince = 0;
-                if (behind && pool.getQueue().isEmpty()) {
-                    behind = false;
+                if (pool.getQueue().isEmpty()) {
                     int missed = skipped.getAndSet(0);
-                    LOGGER.info("Pipeline DORA Metrics: the writer has caught up"
-                            + (missed > 0 ? ", " + missed + " builds were not recorded meanwhile. "
-                                    + "Import history on the dashboard adds them." : "."));
+                    if (missed > 0) {
+                        LOGGER.info("Pipeline DORA Metrics: the writer has caught up. " + missed + " builds were not "
+                                + "recorded meanwhile; Import history on the dashboard adds them.");
+                    }
                 }
             }
         }

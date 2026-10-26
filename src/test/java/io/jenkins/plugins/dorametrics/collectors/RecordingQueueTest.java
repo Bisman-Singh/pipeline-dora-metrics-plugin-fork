@@ -116,6 +116,34 @@ class RecordingQueueTest {
     }
 
     @Test
+    void oneSlowWriteCostsOneBuildTheWaitNotEveryBuild() throws Exception {
+        // writes that each finish, just slowly, as when another process holds the database
+        System.setProperty(RecordingQueue.WAIT_PROPERTY, "2");
+        RecordingQueue.recorder = run -> {
+            started.add(run.getFullDisplayName());
+            try {
+                Thread.sleep(3000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        FreeStyleProject app = j.createFreeStyleProject("app");
+        long t0 = System.nanoTime();
+        j.buildAndAssertSuccess(app);
+        long first = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+        awaitStarted(1);
+        Thread.sleep(1500);
+        long t1 = System.nanoTime();
+        j.buildAndAssertSuccess(app);
+        long second = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t1);
+
+        assertTrue(first >= 2000, "the first build waits out its write, " + first + "ms");
+        assertTrue(second < 2000, "the next one does not wait again, " + second + "ms");
+        assertEquals(1, logs.getMessages().stream().filter(m -> m.contains("took longer than")).count(),
+                String.valueOf(logs.getMessages()));
+    }
+
+    @Test
     void aFullQueueSkipsTheBuildAndSaysSo() throws Exception {
         System.setProperty(RecordingQueue.WAIT_PROPERTY, "0");
         System.setProperty(RecordingQueue.CAPACITY_PROPERTY, "1");
