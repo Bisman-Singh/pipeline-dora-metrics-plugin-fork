@@ -31,7 +31,7 @@ import java.util.logging.Logger;
  * {@link #CAPACITY_PROPERTY} builds are already waiting, a build is not recorded and the log says
  * so. Import history adds any build that was not recorded.
  */
-final class RecordingQueue {
+public final class RecordingQueue {
 
     static final String WAIT_PROPERTY = RecordingQueue.class.getName() + ".waitSeconds";
     static final String CAPACITY_PROPERTY = RecordingQueue.class.getName() + ".capacity";

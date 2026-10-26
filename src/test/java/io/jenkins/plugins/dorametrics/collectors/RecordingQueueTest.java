@@ -1,5 +1,6 @@
 package io.jenkins.plugins.dorametrics.collectors;
 
+import hudson.init.Terminator;
 import hudson.model.FreeStyleBuild;
 import hudson.model.FreeStyleProject;
 import hudson.model.Run;
@@ -11,6 +12,8 @@ import org.jvnet.hudson.test.JenkinsRule;
 import org.jvnet.hudson.test.LogRecorder;
 import org.jvnet.hudson.test.junit.jupiter.WithJenkins;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -128,6 +131,28 @@ class RecordingQueueTest {
         release.countDown();
         awaitStarted(2);
         assertEquals(List.of("app #1", "app #2"), started);
+    }
+
+    @Test
+    void jenkinsCanCallTheShutdownHook() throws Exception {
+        // Jenkins calls a @Terminator reflectively and fails with IllegalAccessException on a non-public class
+        Method shutdown = RecordingQueue.class.getMethod("shutdown");
+        assertTrue(shutdown.isAnnotationPresent(Terminator.class));
+        assertTrue(Modifier.isPublic(RecordingQueue.class.getModifiers()));
+        assertTrue(Modifier.isStatic(shutdown.getModifiers()));
+    }
+
+    @Test
+    void shuttingDownWritesWhatIsQueuedAndClosesTheStore() throws Exception {
+        recorderThatHangs();
+        System.setProperty(RecordingQueue.WAIT_PROPERTY, "0");
+        FreeStyleProject app = j.createFreeStyleProject("app");
+        j.buildAndAssertSuccess(app);
+        j.buildAndAssertSuccess(app);
+        awaitStarted(1);
+        release.countDown();
+        RecordingQueue.shutdown();
+        assertEquals(List.of("app #1", "app #2"), started, "both queued builds are written before it stops");
     }
 
     @Test
