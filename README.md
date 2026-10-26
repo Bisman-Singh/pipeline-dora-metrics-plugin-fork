@@ -85,7 +85,7 @@ date that isn't one, gets a 400 with the reason in `error`.
 
 ## How It Works
 
-A `RunListener` records every build of a tracked job when it finishes, Pipeline or not. Data is stored in an embedded SQLite database at `JENKINS_HOME/pipeline-dora-metrics/metrics.db`. No external database setup required.
+A `RunListener` records every build of a tracked job when it finishes, Pipeline or not, on a background thread. Data is stored in an embedded SQLite database at `JENKINS_HOME/pipeline-dora-metrics/metrics.db`. No external database setup required.
 
 **Data captured per build:**
 - Job name, build number, timestamp, duration, result
@@ -102,6 +102,10 @@ A `RunListener` records every build of a tracked job when it finishes, Pipeline 
 | Medium (50 jobs) | 200 | ~36MB |
 | Large (200 jobs) | 1000 | ~180MB |
 | Enterprise (1000 jobs) | 5000 | ~900MB |
+
+**Keep the database on local disk.** SQLite's locking and syncing are not reliable on network filesystems such as NFS or EFS, and Manage Jenkins shows a warning when the database is on one. If `JENKINS_HOME` is on network storage, start Jenkins with `-Dio.jenkins.plugins.dorametrics.store.MetricsStore.directory=/a/directory/on/local/disk`, or move the `pipeline-dora-metrics` folder to local disk while Jenkins is stopped and link it back. On a new machine the store starts empty, and Import history refills it within its window.
+
+**A build never waits long for it.** Each finished build is written on a background thread. A build waits up to 5 seconds for its own write, so on healthy storage the data is there when it finishes. Past that it finishes anyway and the write carries on behind it, and once a write is that late the builds after it stop waiting at all. When 1000 builds are already waiting to be written, the next one is skipped and logged, and Import history adds it later. Both numbers are system properties, `io.jenkins.plugins.dorametrics.collectors.RecordingQueue.waitSeconds` and `io.jenkins.plugins.dorametrics.collectors.RecordingQueue.capacity`.
 
 ### Build history import
 
@@ -192,6 +196,7 @@ io.jenkins.plugins.dorametrics/
 │   ├── BuildDataCollector      # RunListener, hands finished builds to BuildRecorder
 │   ├── BuildRecorder           # Records a build with its stages, commits and branch
 │   ├── BuildHistoryImporter    # Imports builds already on disk
+│   ├── RecordingQueue          # Writes finished builds in the background, a few seconds of waiting at most
 │   ├── HistoryImportTask       # Runs the first import, once per instance
 │   └── JobRenameListener       # ItemListener, keeps history with renamed and moved jobs, detaches it from deleted ones
 ├── dora/
@@ -204,7 +209,8 @@ io.jenkins.plugins.dorametrics/
 ├── rankings/
 │   └── PipelineRanker          # Pipeline and stage rankings
 ├── store/
-│   ├── MetricsStore            # SQLite database
+│   ├── MetricsStore            # SQLite database, one shared connection for writes
+│   ├── NetworkStorageMonitor   # Manage Jenkins warning when the database is on network storage
 │   ├── MetricsExporter         # Builds snapshots, delegates upload to config
 │   ├── MetricsExportTask       # Scheduled export
 │   └── MetricsMaintenanceTask  # Hourly retention cleanup
